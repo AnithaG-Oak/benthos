@@ -43,6 +43,14 @@ func ParseMapping(pCtx Context, expr string) (*mapping.Executor, *Error) {
 //------------------------------------------------------------------------------
 
 func mappingStatement(pCtx Context, enableMeta bool, maps map[string]query.Function) Func {
+	if maps == nil {
+		return OneOf(
+			importParser(pCtx, maps),
+			letStatementParser(pCtx),
+			metaStatementParser(pCtx, enableMeta),
+			plainMappingStatementParser(pCtx),
+		)
+	}
 	return OneOf(
 		importParser(pCtx, maps),
 		mapParser(pCtx, maps),

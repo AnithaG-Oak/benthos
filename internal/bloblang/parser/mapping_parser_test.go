@@ -118,7 +118,7 @@ foo = bar.apply("foo")`,
   meta foo = "bar"
 }
 foo = bar.apply("foo")`,
-			errContains: `line 2 char 3: setting meta fields from within a map is not allowed`,
+			errContains: `line 2 char 3: setting meta fields is not allowed within this block`,
 		},
 		"no name map definition": {
 			mapping: `map {

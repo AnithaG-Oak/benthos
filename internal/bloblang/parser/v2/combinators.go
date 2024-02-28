@@ -18,6 +18,28 @@ type Result[T any] struct {
 // Func is the common signature of a parser function.
 type Func[T any] func([]rune) Result[T]
 
+// DiscardFuncAs converts a Func of type Tin into a Func of type Tout.
+//
+// WARNING: No conversion is made between payloads of Tin to Tout, instead a
+// zero value of Tout will be emitted.
+func DiscardFuncAs[Tin, Tout any](f Func[Tin]) Func[Tout] {
+	return func(r []rune) Result[Tout] {
+		return ResultInto[Tout](f(r))
+	}
+}
+
+// FuncAsAny converts a Func of type Tin into a Func of type any. The payload is
+// passed unchanged but cast into an any.
+func FuncAsAny[T any](f Func[T]) Func[any] {
+	return func(r []rune) Result[any] {
+		tmpRes := f(r)
+
+		outRes := ResultInto[any](tmpRes)
+		outRes.Payload = tmpRes.Payload
+		return outRes
+	}
+}
+
 //------------------------------------------------------------------------------
 
 // Success creates a result with a payload from successful parsing.
@@ -36,7 +58,7 @@ func Fail[T any](err *Error, input []rune) Result[T] {
 	}
 }
 
-func Into[T any, L any](from Result[L]) Result[T] {
+func ResultInto[T any, L any](from Result[L]) Result[T] {
 	return Result[T]{
 		Err:       from.Err,
 		Remaining: from.Remaining,
@@ -215,7 +237,7 @@ var Number = func() Func[any] {
 		}
 		res = expectNumber(res.Remaining)
 		if res.Err != nil {
-			return Into[any](res)
+			return ResultInto[any](res)
 		}
 		resStr := res.Payload
 		if resTest := dot(res.Remaining); resTest.Err == nil {
@@ -225,7 +247,7 @@ var Number = func() Func[any] {
 			}
 		}
 
-		outRes := Into[any](res)
+		outRes := ResultInto[any](res)
 		if strings.Contains(resStr, ".") {
 			f, err := strconv.ParseFloat(resStr, 64)
 			if err != nil {
@@ -257,9 +279,9 @@ var Boolean = func() Func[bool] {
 	return func(input []rune) Result[bool] {
 		res := parser(input)
 		if res.Err == nil {
-			res.Payload = res.Payload.(string) == "true"
+			return Success(res.Payload == "true", res.Remaining)
 		}
-		return res
+		return ResultInto[bool](res)
 	}
 }()
 
@@ -267,7 +289,7 @@ var Boolean = func() Func[bool] {
 var Null = func() Func[any] {
 	nullMatch := Term("null")
 	return func(input []rune) Result[any] {
-		res := Into[any](nullMatch(input))
+		res := ResultInto[any](nullMatch(input))
 		if res.Err == nil {
 			res.Payload = nil
 		}
@@ -288,7 +310,6 @@ func Array() Func[[]any] {
 			DiscardedWhitespaceNewlineComments,
 		),
 		Sequence(DiscardedWhitespaceNewlineComments, charSquareClose),
-		true,
 	)
 
 	return func(r []rune) Result[[]any] {
@@ -303,10 +324,10 @@ func Object() Func[map[string]any] {
 			charSquigOpen, DiscardedWhitespaceNewlineComments,
 		), "object"),
 		Sequence(
-			QuotedString,
-			Discard(SpacesAndTabs),
-			charColon,
-			DiscardedWhitespaceNewlineComments,
+			FuncAsAny(QuotedString),
+			FuncAsAny(Discard(SpacesAndTabs)),
+			FuncAsAny(charColon),
+			FuncAsAny(DiscardedWhitespaceNewlineComments),
 			LiteralValue(),
 		),
 		Sequence(
@@ -315,23 +336,20 @@ func Object() Func[map[string]any] {
 			DiscardedWhitespaceNewlineComments,
 		),
 		Sequence(DiscardedWhitespaceNewlineComments, charSquigClose),
-		true,
 	)
 
 	return func(input []rune) Result[map[string]any] {
 		res := pattern(input)
 		if res.Err != nil {
-			return res
+			return Fail[map[string]any](res.Err, input)
 		}
 
 		values := map[string]any{}
-		for _, sequenceValue := range res.Payload.([]any) {
-			slice := sequenceValue.([]any)
-			values[slice[0].(string)] = slice[4]
+		for _, kv := range res.Payload {
+			values[kv[0].(string)] = kv[4]
 		}
 
-		res.Payload = values
-		return res
+		return Success(values, res.Remaining)
 	}
 }
 
@@ -340,13 +358,13 @@ func Object() Func[map[string]any] {
 func LiteralValue() Func[any] {
 	return func(r []rune) Result[any] {
 		return OneOf(
-			Boolean,
-			Number,
-			TripleQuoteString,
-			QuotedString,
-			Null,
-			Array(),
-			Object(),
+			FuncAsAny(Boolean),
+			FuncAsAny(Number),
+			FuncAsAny(TripleQuoteString),
+			FuncAsAny(QuotedString),
+			FuncAsAny(Null),
+			FuncAsAny(Array()),
+			FuncAsAny(Object()),
 		)(r)
 	}
 }
@@ -356,20 +374,19 @@ func LiteralValue() Func[any] {
 //
 // Warning! If the result is not a []interface{}, or if an element is not a
 // string, then this parser returns a zero value instead.
-func JoinStringPayloads(p Func[[]any]) Func[string] {
+func JoinStringPayloads(p Func[[]string]) Func[string] {
 	return func(input []rune) Result[string] {
 		res := p(input)
 		if res.Err != nil {
-			return Into[string](res)
+			return ResultInto[string](res)
 		}
 
 		var buf bytes.Buffer
 		for _, v := range res.Payload {
-			str, _ := v.(string)
-			buf.WriteString(str)
+			buf.WriteString(v)
 		}
 
-		outRes := Into[string](res)
+		outRes := ResultInto[string](res)
 		outRes.Payload = buf.String()
 		return outRes
 	}
@@ -480,7 +497,7 @@ func UntilFail[T any](parser Func[T]) Func[[]T] {
 	return func(input []rune) Result[[]T] {
 		res := parser(input)
 		if res.Err != nil {
-			return Into[[]T](res)
+			return ResultInto[[]T](res)
 		}
 		results := []T{res.Payload}
 		for {
@@ -501,47 +518,50 @@ func UntilFail[T any](parser Func[T]) Func[[]T] {
 //
 // Only the results of the primary parser are returned, the results of the
 // start, delimiter and stop parsers are discarded.
-func DelimitedPattern(
-	start, primary, delimiter, stop Func,
-	allowTrailing bool,
-) Func {
-	return func(input []rune) Result {
-		res := start(input)
-		if res.Err != nil {
-			return res
+func DelimitedPattern[S, P, D, E any](
+	start Func[S], primary Func[P], delimiter Func[D], stop Func[E],
+) Func[[]P] {
+	return func(input []rune) Result[[]P] {
+		var remaining []rune
+		if res := start(input); res.Err != nil {
+			return ResultInto[[]P](res)
+		} else {
+			remaining = res.Remaining
 		}
 
-		results := []any{}
+		results := []P{}
 
-		if res = primary(res.Remaining); res.Err != nil {
+		if res := primary(remaining); res.Err != nil {
 			if resStop := stop(res.Remaining); resStop.Err == nil {
-				resStop.Payload = results
-				return resStop
+				return Success(results, resStop.Remaining)
 			}
-			return Fail(res.Err, input)
+			return Fail[[]P](res.Err, input)
+		} else {
+			results = append(results, res.Payload)
+			remaining = res.Remaining
 		}
-		results = append(results, res.Payload)
 
 		for {
-			if res = delimiter(res.Remaining); res.Err != nil {
+			if res := delimiter(remaining); res.Err != nil {
 				resStop := stop(res.Remaining)
 				if resStop.Err == nil {
-					resStop.Payload = results
-					return resStop
+					return Success(results, resStop.Remaining)
 				}
 				res.Err.Add(resStop.Err)
-				return Fail(res.Err, input)
+				return Fail[[]P](res.Err, input)
+			} else {
+				remaining = res.Remaining
 			}
-			if res = primary(res.Remaining); res.Err != nil {
-				if allowTrailing {
-					if resStop := stop(res.Remaining); resStop.Err == nil {
-						resStop.Payload = results
-						return resStop
-					}
+
+			if res := primary(remaining); res.Err != nil {
+				if resStop := stop(res.Remaining); resStop.Err == nil {
+					return Success(results, resStop.Remaining)
 				}
-				return Fail(res.Err, input)
+				return Fail[[]P](res.Err, input)
+			} else {
+				results = append(results, res.Payload)
+				remaining = res.Remaining
 			}
-			results = append(results, res.Payload)
 		}
 	}
 }
@@ -549,9 +569,9 @@ func DelimitedPattern(
 // DelimitedResult is an explicit result struct returned by the Delimited
 // parser, containing a slice of primary parser payloads and a slice of
 // delimited parser payloads.
-type DelimitedResult struct {
-	Primary   []any
-	Delimiter []any
+type DelimitedResult[P, D any] struct {
+	Primary   []P
+	Delimiter []D
 }
 
 // Delimited attempts to parse one or more primary parsers, where after the
@@ -560,23 +580,25 @@ type DelimitedResult struct {
 //
 // Two slices are returned, the first element being a slice of primary results
 // and the second element being the delimiter results.
-func Delimited(primary, delimiter Func) Func {
-	return func(input []rune) Result {
-		delimRes := DelimitedResult{}
+func Delimited[P, D any](primary Func[P], delimiter Func[D]) Func[DelimitedResult[P, D]] {
+	return func(input []rune) Result[DelimitedResult[P, D]] {
+		delimRes := DelimitedResult[P, D]{}
 
 		res := primary(input)
 		if res.Err != nil {
-			return res
+			return ResultInto[DelimitedResult[P, D]](res)
 		}
 		delimRes.Primary = append(delimRes.Primary, res.Payload)
 
 		for {
-			if res = delimiter(res.Remaining); res.Err != nil {
-				return Success(delimRes, res.Remaining)
+			dRes := delimiter(res.Remaining)
+			if dRes.Err != nil {
+				return Success(delimRes, dRes.Remaining)
 			}
-			delimRes.Delimiter = append(delimRes.Delimiter, res.Payload)
-			if res = primary(res.Remaining); res.Err != nil {
-				return Fail(res.Err, input)
+			delimRes.Delimiter = append(delimRes.Delimiter, dRes.Payload)
+
+			if res = primary(dRes.Remaining); res.Err != nil {
+				return Fail[DelimitedResult[P, D]](res.Err, input)
 			}
 			delimRes.Primary = append(delimRes.Primary, res.Payload)
 		}
@@ -585,15 +607,16 @@ func Delimited(primary, delimiter Func) Func {
 
 // Sequence applies a sequence of parsers and returns either a slice of the
 // results or an error if any parser fails.
-func Sequence(parsers ...Func) Func {
-	return func(input []rune) Result {
-		results := make([]any, 0, len(parsers))
-		res := Result{
+func Sequence[T any](parsers ...Func[T]) Func[[]T] {
+	return func(input []rune) Result[[]T] {
+		results := make([]T, 0, len(parsers))
+
+		res := Result[T]{
 			Remaining: input,
 		}
 		for _, p := range parsers {
 			if res = p(res.Remaining); res.Err != nil {
-				return Fail(res.Err, input)
+				return Fail[[]T](res.Err, input)
 			}
 			results = append(results, res.Payload)
 		}
@@ -604,8 +627,8 @@ func Sequence(parsers ...Func) Func {
 // Optional applies a child parser and if it returns an ExpectedError then it is
 // cleared and a nil result is returned instead. Any other form of error will be
 // returned unchanged.
-func Optional(parser Func) Func {
-	return func(input []rune) Result {
+func Optional[T any](parser Func[T]) Func[T] {
+	return func(input []rune) Result[T] {
 		res := parser(input)
 		if res.Err != nil && !res.Err.IsFatal() {
 			res.Err = nil
@@ -616,10 +639,11 @@ func Optional(parser Func) Func {
 
 // Discard the result of a child parser, regardless of the result. This has the
 // effect of running the parser and returning only Remaining.
-func Discard(parser Func) Func {
-	return func(input []rune) Result {
+func Discard[T any](parser Func[T]) Func[T] {
+	return func(input []rune) Result[T] {
 		res := parser(input)
-		res.Payload = nil
+		var tmp T
+		res.Payload = tmp
 		res.Err = nil
 		return res
 	}
@@ -627,13 +651,14 @@ func Discard(parser Func) Func {
 
 // DiscardAll the results of a child parser, applied until it fails. This has
 // the effect of running the parser and returning only Remaining.
-func DiscardAll(parser Func) Func {
-	return func(input []rune) Result {
+func DiscardAll[T any](parser Func[T]) Func[T] {
+	return func(input []rune) Result[T] {
 		res := parser(input)
 		for res.Err == nil {
 			res = parser(res.Remaining)
 		}
-		res.Payload = nil
+		var tmp T
+		res.Payload = tmp
 		res.Err = nil
 		return res
 	}
@@ -641,8 +666,8 @@ func DiscardAll(parser Func) Func {
 
 // MustBe applies a parser and if the result is a non-fatal error then it is
 // upgraded to a fatal one.
-func MustBe(parser Func) Func {
-	return func(input []rune) Result {
+func MustBe[T any](parser Func[T]) Func[T] {
+	return func(input []rune) Result[T] {
 		res := parser(input)
 		if res.Err != nil && !res.Err.IsFatal() {
 			res.Err.Err = errors.New("required")
@@ -653,8 +678,8 @@ func MustBe(parser Func) Func {
 
 // Expect applies a parser and if an error is returned the list of expected candidates is replaced with the given
 // strings. This is useful for providing better context to users.
-func Expect(parser Func, expected ...string) Func {
-	return func(input []rune) Result {
+func Expect[T any](parser Func[T], expected ...string) Func[T] {
+	return func(input []rune) Result[T] {
 		res := parser(input)
 		if res.Err != nil && !res.Err.IsFatal() {
 			res.Err.Expected = expected
@@ -666,8 +691,8 @@ func Expect(parser Func, expected ...string) Func {
 // OneOf accepts one or more parsers and tries them in order against an input.
 // If a parser returns an ExpectedError then the next parser is tried and so
 // on. Otherwise, the result is returned.
-func OneOf(parsers ...Func) Func {
-	return func(input []rune) Result {
+func OneOf[T any](parsers ...Func[T]) Func[T] {
+	return func(input []rune) Result[T] {
 		var err *Error
 		for _, p := range parsers {
 			res := p(input)
@@ -680,11 +705,11 @@ func OneOf(parsers ...Func) Func {
 				err.Add(res.Err)
 			}
 		}
-		return Fail(err, input)
+		return Fail[T](err, input)
 	}
 }
 
-func bestMatch(left, right Result) Result {
+func bestMatch[T any](left, right Result[T]) Result[T] {
 	remainingLeft := len(left.Remaining)
 	remainingRight := len(right.Remaining)
 	if left.Err != nil {
@@ -716,11 +741,11 @@ func bestMatch(left, right Result) Result {
 // 'aaaa', if the input 'aaab' were provided then an error from parser B would
 // be returned, as although the input didn't match, it matched more of parser B
 // than parser A.
-func BestMatch(parsers ...Func) Func {
+func BestMatch[T any](parsers ...Func[T]) Func[T] {
 	if len(parsers) == 1 {
 		return parsers[0]
 	}
-	return func(input []rune) Result {
+	return func(input []rune) Result[T] {
 		res := parsers[0](input)
 		for _, p := range parsers[1:] {
 			resTmp := p(input)
