@@ -18,11 +18,11 @@ type Result[T any] struct {
 // Func is the common signature of a parser function.
 type Func[T any] func([]rune) Result[T]
 
-// DiscardFuncAs converts a Func of type Tin into a Func of type Tout.
+// ZeroedFuncAs converts a Func of type Tin into a Func of type Tout.
 //
 // WARNING: No conversion is made between payloads of Tin to Tout, instead a
 // zero value of Tout will be emitted.
-func DiscardFuncAs[Tin, Tout any](f Func[Tin]) Func[Tout] {
+func ZeroedFuncAs[Tin, Tout any](f Func[Tin]) Func[Tout] {
 	return func(r []rune) Result[Tout] {
 		return ResultInto[Tout](f(r))
 	}
@@ -602,6 +602,21 @@ func Delimited[P, D any](primary Func[P], delimiter Func[D]) Func[DelimitedResul
 			}
 			delimRes.Primary = append(delimRes.Primary, res.Payload)
 		}
+	}
+}
+
+// TakeOnly wraps an array based combinator with one that only extracts a single
+// element of the resulting values. NOTE: If the index is
+func TakeOnly[T any](index int, p Func[[]T]) Func[T] {
+	return func(input []rune) Result[T] {
+		res := p(input)
+		if res.Err != nil {
+			return Fail[T](res.Err, input)
+		}
+		if len(res.Payload) <= index {
+			return ResultInto[T](res)
+		}
+		return Success(res.Payload[index], res.Remaining)
 	}
 }
 

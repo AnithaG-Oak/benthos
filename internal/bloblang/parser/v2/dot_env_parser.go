@@ -17,10 +17,10 @@ var dotEnvParser = func() Func[map[string]string] {
 	envFileParser := Delimited(
 		Expect(OneOf(
 			assignmentParser,
-			DiscardFuncAs[string, []string](SpacesAndTabs),
-			DiscardFuncAs[any, []string](EmptyLine),
-			DiscardFuncAs[any, []string](EndOfInput),
-			DiscardFuncAs[[]any, []string](Sequence(
+			ZeroedFuncAs[string, []string](SpacesAndTabs),
+			ZeroedFuncAs[any, []string](EmptyLine),
+			ZeroedFuncAs[any, []string](EndOfInput),
+			ZeroedFuncAs[[]any, []string](Sequence(
 				FuncAsAny(charHash),
 				FuncAsAny(Optional(UntilFail(NotChar('\n')))),
 			)),

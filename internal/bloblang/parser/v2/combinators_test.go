@@ -1767,3 +1767,42 @@ func TestAnyOf(t *testing.T) {
 		})
 	}
 }
+
+func TestTakeOnly(t *testing.T) {
+	pattern := TakeOnly(1, UntilFail(OneOf(Char('1'), Char('2'), Char('3'))))
+
+	tests := map[string]struct {
+		input     string
+		result    string
+		remaining string
+		err       *Error
+	}{
+		"empty input": {
+			err: NewError([]rune(""), "1", "2", "3"),
+		},
+		"fewer than needed": {
+			input:     "2",
+			result:    "",
+			remaining: "",
+		},
+		"exactly needed": {
+			input:     "12",
+			result:    "2",
+			remaining: "",
+		},
+		"more than needed": {
+			input:     "123",
+			result:    "2",
+			remaining: "",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			res := pattern([]rune(test.input))
+			require.Equal(t, test.err, res.Err, "Error")
+			assert.Equal(t, test.result, res.Payload, "Result")
+			assert.Equal(t, test.remaining, string(res.Remaining), "Remaining")
+		})
+	}
+}
