@@ -224,6 +224,8 @@ var Number = func() Func[any] {
 				res = resTest
 			}
 		}
+
+		outRes := Into[any](res)
 		if strings.Contains(resStr, ".") {
 			f, err := strconv.ParseFloat(resStr, 64)
 			if err != nil {
@@ -233,27 +235,26 @@ var Number = func() Func[any] {
 			if negative {
 				f = -f
 			}
-			res = Into[any](res)
-			res.Payload = f
+			outRes.Payload = f
 		} else {
 			i, err := strconv.ParseInt(resStr, 10, 64)
 			if err != nil {
 				err = fmt.Errorf("failed to parse '%v' as integer: %v", resStr, err)
-				return Fail(NewFatalError(input, err), input)
+				return Fail[any](NewFatalError(input, err), input)
 			}
 			if negative {
 				i = -i
 			}
-			res.Payload = i
+			outRes.Payload = i
 		}
-		return res
+		return outRes
 	}
 }()
 
 // Boolean parses either 'true' or 'false' into a boolean value.
-var Boolean = func() Func {
+var Boolean = func() Func[bool] {
 	parser := Expect(OneOf(Term("true"), Term("false")), "boolean")
-	return func(input []rune) Result {
+	return func(input []rune) Result[bool] {
 		res := parser(input)
 		if res.Err == nil {
 			res.Payload = res.Payload.(string) == "true"
@@ -263,10 +264,10 @@ var Boolean = func() Func {
 }()
 
 // Null parses a null literal value.
-var Null = func() Func {
+var Null = func() Func[any] {
 	nullMatch := Term("null")
-	return func(input []rune) Result {
-		res := nullMatch(input)
+	return func(input []rune) Result[any] {
+		res := Into[any](nullMatch(input))
 		if res.Err == nil {
 			res.Payload = nil
 		}
@@ -277,7 +278,7 @@ var Null = func() Func {
 var DiscardedWhitespaceNewlineComments = DiscardAll(OneOf(SpacesAndTabs, NewlineAllowComment))
 
 // Array parses an array literal.
-func Array() Func {
+func Array() Func[[]any] {
 	pattern := DelimitedPattern(
 		Expect(Sequence(charSquareOpen, DiscardedWhitespaceNewlineComments), "array"),
 		LiteralValue(),
@@ -290,13 +291,13 @@ func Array() Func {
 		true,
 	)
 
-	return func(r []rune) Result {
+	return func(r []rune) Result[[]any] {
 		return pattern(r)
 	}
 }
 
 // Object parses an object literal.
-func Object() Func {
+func Object() Func[map[string]any] {
 	pattern := DelimitedPattern(
 		Expect(Sequence(
 			charSquigOpen, DiscardedWhitespaceNewlineComments,
@@ -317,7 +318,7 @@ func Object() Func {
 		true,
 	)
 
-	return func(input []rune) Result {
+	return func(input []rune) Result[map[string]any] {
 		res := pattern(input)
 		if res.Err != nil {
 			return res
@@ -336,8 +337,8 @@ func Object() Func {
 
 // LiteralValue parses a literal bool, number, quoted string, null value, array
 // of literal values, or object.
-func LiteralValue() Func {
-	return func(r []rune) Result {
+func LiteralValue() Func[any] {
+	return func(r []rune) Result[any] {
 		return OneOf(
 			Boolean,
 			Number,
@@ -355,22 +356,22 @@ func LiteralValue() Func {
 //
 // Warning! If the result is not a []interface{}, or if an element is not a
 // string, then this parser returns a zero value instead.
-func JoinStringPayloads(p Func) Func {
-	return func(input []rune) Result {
+func JoinStringPayloads(p Func[[]any]) Func[string] {
+	return func(input []rune) Result[string] {
 		res := p(input)
 		if res.Err != nil {
-			return res
+			return Into[string](res)
 		}
 
 		var buf bytes.Buffer
-		slice, _ := res.Payload.([]any)
-
-		for _, v := range slice {
+		for _, v := range res.Payload {
 			str, _ := v.(string)
 			buf.WriteString(str)
 		}
-		res.Payload = buf.String()
-		return res
+
+		outRes := Into[string](res)
+		outRes.Payload = buf.String()
+		return outRes
 	}
 }
 
@@ -396,12 +397,12 @@ var SnakeCase = Expect(JoinStringPayloads(UntilFail(OneOf(
 
 // TripleQuoteString parses a single instance of a triple-quoted multiple line
 // string. The result is the inner contents.
-func TripleQuoteString(input []rune) Result {
+func TripleQuoteString(input []rune) Result[string] {
 	if len(input) < 6 ||
 		input[0] != '"' ||
 		input[1] != '"' ||
 		input[2] != '"' {
-		return Fail(NewError(input, "quoted string"), input)
+		return Fail[string](NewError(input, "quoted string"), input)
 	}
 	for i := 3; i < len(input)-2; i++ {
 		if input[i] == '"' &&
@@ -410,14 +411,14 @@ func TripleQuoteString(input []rune) Result {
 			return Success(string(input[3:i]), input[i+3:])
 		}
 	}
-	return Fail(NewFatalError(input[len(input):], errors.New("required"), "end triple-quote"), input)
+	return Fail[string](NewFatalError(input[len(input):], errors.New("required"), "end triple-quote"), input)
 }
 
 // QuotedString parses a single instance of a quoted string. The result is the
 // inner contents unescaped.
-func QuotedString(input []rune) Result {
+func QuotedString(input []rune) Result[string] {
 	if len(input) == 0 || input[0] != '"' {
-		return Fail(NewError(input, "quoted string"), input)
+		return Fail[string](NewError(input, "quoted string"), input)
 	}
 	escaped := false
 	for i := 1; i < len(input); i++ {
@@ -425,12 +426,12 @@ func QuotedString(input []rune) Result {
 			unquoted, err := strconv.Unquote(string(input[:i+1]))
 			if err != nil {
 				err = fmt.Errorf("failed to unescape quoted string contents: %v", err)
-				return Fail(NewFatalError(input, err), input)
+				return Fail[string](NewFatalError(input, err), input)
 			}
 			return Success(unquoted, input[i+1:])
 		}
 		if input[i] == '\n' {
-			Fail(NewFatalError(input[i:], errors.New("required"), "end quote"), input)
+			Fail[string](NewFatalError(input[i:], errors.New("required"), "end quote"), input)
 		}
 		if input[i] == '\\' {
 			escaped = !escaped
@@ -438,24 +439,24 @@ func QuotedString(input []rune) Result {
 			escaped = false
 		}
 	}
-	return Fail(NewFatalError(input[len(input):], errors.New("required"), "end quote"), input)
+	return Fail[string](NewFatalError(input[len(input):], errors.New("required"), "end quote"), input)
 }
 
 // EmptyLine ensures that a line is empty, but doesn't advance the parser beyond
 // the newline char.
-func EmptyLine(r []rune) Result {
+func EmptyLine(r []rune) Result[any] {
 	if len(r) > 0 && r[0] == '\n' {
-		return Success(nil, r)
+		return Success[any](nil, r)
 	}
-	return Fail(NewError(r, "Empty line"), r)
+	return Fail[any](NewError(r, "Empty line"), r)
 }
 
 // EndOfInput ensures that the input is now empty.
-func EndOfInput(r []rune) Result {
+func EndOfInput(r []rune) Result[any] {
 	if len(r) == 0 {
-		return Success(nil, r)
+		return Success[any](nil, r)
 	}
-	return Fail(NewError(r, "End of input"), r)
+	return Fail[any](NewError(r, "End of input"), r)
 }
 
 // Newline parses a line break.
@@ -475,13 +476,13 @@ var NewlineAllowComment = Expect(OneOf(Comment, Newline), "line break")
 
 // UntilFail applies a parser until it fails, and returns a slice containing all
 // results. If the parser does not succeed at least once an error is returned.
-func UntilFail(parser Func) Func {
-	return func(input []rune) Result {
+func UntilFail[T any](parser Func[T]) Func[[]T] {
+	return func(input []rune) Result[[]T] {
 		res := parser(input)
 		if res.Err != nil {
-			return res
+			return Into[[]T](res)
 		}
-		results := []any{res.Payload}
+		results := []T{res.Payload}
 		for {
 			if res = parser(res.Remaining); res.Err != nil {
 				return Success(results, res.Remaining)

@@ -40,24 +40,28 @@ func ParseMapping(pCtx Context, expr string) (*mapping.Executor, *Error) {
 	return res.Payload.(*mapping.Executor), nil
 }
 
-//------------------------------------------------------------------------------'
+//------------------------------------------------------------------------------
+
+func mappingStatement(pCtx Context, enableMeta bool, maps map[string]query.Function) Func {
+	return OneOf(
+		importParser(pCtx, maps),
+		mapParser(pCtx, maps),
+		letStatementParser(pCtx),
+		metaStatementParser(pCtx, enableMeta),
+		plainMappingStatementParser(pCtx),
+	)
+}
 
 func parseExecutor(pCtx Context) Func {
 	return func(input []rune) Result {
 		maps := map[string]query.Function{}
 		statements := []mapping.Statement{}
 
-		statement := OneOf(
-			importParser(maps, pCtx),
-			mapParser(maps, pCtx),
-			letStatementParser(pCtx),
-			metaStatementParser(false, pCtx),
-			plainMappingStatementParser(pCtx),
-		)
+		statementPattern := mappingStatement(pCtx, true, maps)
 
 		res := DiscardedWhitespaceNewlineComments(input)
 
-		res = statement(res.Remaining)
+		res = statementPattern(res.Remaining)
 		if res.Err != nil {
 			res.Remaining = input
 			return res
@@ -81,7 +85,7 @@ func parseExecutor(pCtx Context) Func {
 				break
 			}
 
-			if res = statement(res.Remaining); res.Err != nil {
+			if res = statementPattern(res.Remaining); res.Err != nil {
 				return Fail(res.Err, input)
 			}
 			if mStmt, ok := res.Payload.(mapping.Statement); ok {
@@ -183,11 +187,18 @@ var importParserComb = Sequence(
 	),
 )
 
-func importParser(maps map[string]query.Function, pCtx Context) Func {
+func importParser(pCtx Context, maps map[string]query.Function) Func {
 	return func(input []rune) Result {
 		res := importParserComb(input)
 		if res.Err != nil {
 			return res
+		}
+
+		if maps == nil {
+			return Fail(
+				NewFatalError(input, errors.New("importing mappings is not allowed within this block")),
+				input,
+			)
 		}
 
 		fpath := res.Payload.([]any)[2].(string)
@@ -227,7 +238,7 @@ func importParser(maps map[string]query.Function, pCtx Context) Func {
 	}
 }
 
-func mapParser(maps map[string]query.Function, pCtx Context) Func {
+func mapParser(pCtx Context, maps map[string]query.Function) Func {
 	p := Sequence(
 		Term("map"),
 		SpacesAndTabs,
@@ -247,11 +258,8 @@ func mapParser(maps map[string]query.Function, pCtx Context) Func {
 				charSquigOpen,
 				DiscardedWhitespaceNewlineComments,
 			),
-			OneOf(
-				letStatementParser(pCtx),
-				metaStatementParser(true, pCtx), // Prevented for now due to .from(int)
-				plainMappingStatementParser(pCtx),
-			),
+			// Prevent imports, maps and metadata assignments.
+			mappingStatement(pCtx, false, nil),
 			Sequence(
 				Discard(SpacesAndTabs),
 				NewlineAllowComment,
@@ -268,6 +276,13 @@ func mapParser(maps map[string]query.Function, pCtx Context) Func {
 		res := p(input)
 		if res.Err != nil {
 			return res
+		}
+
+		if maps == nil {
+			return Fail(
+				NewFatalError(input, errors.New("defining maps is not allowed within this block")),
+				input,
+			)
 		}
 
 		seqSlice := res.Payload.([]any)
@@ -337,7 +352,7 @@ var nameLiteralParser = JoinStringPayloads(
 	),
 )
 
-func metaStatementParser(disabled bool, pCtx Context) Func {
+func metaStatementParser(pCtx Context, enabled bool) Func {
 	p := Sequence(
 		Expect(Term("meta"), "assignment"),
 		SpacesAndTabs,
@@ -357,9 +372,9 @@ func metaStatementParser(disabled bool, pCtx Context) Func {
 		if res.Err != nil {
 			return res
 		}
-		if disabled {
+		if !enabled {
 			return Fail(
-				NewFatalError(input, errors.New("setting meta fields from within a map is not allowed")),
+				NewFatalError(input, errors.New("setting meta fields is not allowed within this block")),
 				input,
 			)
 		}
